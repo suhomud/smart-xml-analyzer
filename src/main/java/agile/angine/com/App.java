@@ -1,11 +1,15 @@
 package agile.angine.com;
 
+import agile.angine.com.display.ConsoleDisplay;
+import agile.angine.com.display.Display;
+import agile.angine.com.models.Range;
+import agile.angine.com.selectors.DocumentSelector;
+import agile.angine.com.selectors.Selector;
+import agile.angine.com.util.DocumentParser;
+import agile.angine.com.weight.ElementSimilarityWeight;
 import org.apache.commons.cli.*;
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Attributes;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
-import org.jsoup.nodes.Node;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,53 +17,44 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 public class App {
+
     private static Logger LOGGER = LoggerFactory.getLogger(App.class);
 
     private static final String OPTION_ORIGIN_FILE_PATH = "ip";
     private static final String OPTION_OTHER_SAMPLE_FILE_PATH = "op";
     private static final String OPTION_SEARCHING_ID = "id";
-    private static final String CHARSET_NAME = "utf8";
 
-    private static int DEFAULT_MINIMUM_WEIGHT = 20;
+    private static int DEFAULT_MINIMUM_WEIGHT = 50;
 
     private static String INPUT_ORIGIN_FILE_PATH = "";
     private static String INPUT_OTHER_SAMPLE_FILE_PATH = "";
     private static String SEARCHING_ELEMENT_ID = "";
 
+    private static Selector selector = new DocumentSelector();
+    private static Display display = new ConsoleDisplay();
+    private static Element originalElementById;
+
     public static void main(String[] args) {
         try {
-            // set up
             setupParrams(args);
 
-            // collecting searchingData
-            File originFile = new File(INPUT_ORIGIN_FILE_PATH);
-            Document originalDocument = parseFile(originFile)
-                    .orElseThrow(() -> new IllegalArgumentException("could not load origin document"));
-            Optional<Element> originElementById = findElementById(originalDocument, SEARCHING_ELEMENT_ID);
-            Element originElement = originElementById
-                    .orElseThrow(() -> new NoSuchElementException("could not find element by id"));
-            Attributes originAttributes = originElement.attributes();
+            Document originalDocument = getDocument(INPUT_ORIGIN_FILE_PATH, "could not load origin document");
 
-            // collecting attributes from other file
-            File otherFile = new File(INPUT_OTHER_SAMPLE_FILE_PATH);
-            Document otherDocument = parseFile(otherFile)
-                    .orElseThrow(() -> new IllegalArgumentException("could not load other document"));
-            Optional<Elements> otherElementsByTagOpt = findElementsByQuery(otherDocument, originElement.tag().toString());
-            Map<Element, Attributes> otherElementAttrs = getElementAttributes(otherElementsByTagOpt.
-                    orElseThrow(() -> new NoSuchElementException("could not find elements with provided arguments")));
+            originalElementById = getSearchElementById(originalDocument);
 
-            // weighting similarity
-            Map<Element, Integer> elementSimilarityWeight = weightSimilarity(originAttributes, otherElementAttrs);
+            Document searchDocument = getDocument(INPUT_OTHER_SAMPLE_FILE_PATH, "could not load other document");
 
-            // getting result
-            Optional<Element> searchItem = getElementWithRelevantWeight(elementSimilarityWeight);
+            Elements possibleSimilarElements = getPossibleElements(searchDocument);
 
-            printResult(searchItem.orElseThrow(() -> new NoSuchElementException("Could not find provided element ")));
+            List<Range> elementsRange = getWeightedRange(possibleSimilarElements);
+            Collections.sort(elementsRange);
+
+            Optional<Element> searchItem = getElementWithRelevantWeight(elementsRange);
+
+            display.display(searchItem.orElseThrow(() -> new NoSuchElementException("Could not find provided element")));
+
         } catch (RuntimeException pe) {
             LOGGER.info(pe.getMessage());
         } catch (Exception ex) {
@@ -67,10 +62,40 @@ public class App {
         }
     }
 
-    private static Optional<Element> getElementWithRelevantWeight(Map<Element, Integer> elementSimilarityWeight) {
-        return elementSimilarityWeight.entrySet().stream()
-                .filter(map -> map.getValue() >= DEFAULT_MINIMUM_WEIGHT)
-                .map(Map.Entry::getKey)
+    private static List<Range> getWeightedRange(Elements possibleSimilarElements) {
+        ElementSimilarityWeight similarityWeight = ElementSimilarityWeight.builder()
+                .withMeasure(originalElementById)
+                .build();
+
+        List<Range> elementsRange = new ArrayList<>(possibleSimilarElements.size());
+
+        possibleSimilarElements.forEach(element -> {
+            elementsRange.add(similarityWeight.calculateWeight(element));
+        });
+
+        return elementsRange;
+    }
+
+    private static Element getSearchElementById(Document originalDocument) {
+        return selector.selectById(SEARCHING_ELEMENT_ID, originalDocument)
+                .orElseThrow(() -> new NoSuchElementException("could not find element by id"));
+    }
+
+    private static Elements getPossibleElements(Document otherDocument) {
+        return selector.selectByQuery(originalElementById.tag().toString(), otherDocument)
+                .orElseThrow(() -> new NoSuchElementException("could not find elements with provided arguments"));
+    }
+
+    private static Document getDocument(String inputOriginFilePath, String s) throws IOException {
+        File originFile = new File(inputOriginFilePath);
+        return DocumentParser.toDocument(originFile)
+                .orElseThrow(() -> new IllegalArgumentException(s));
+    }
+
+    private static Optional<Element> getElementWithRelevantWeight(List<Range> elementsRange) {
+        return elementsRange.stream()
+                .filter(range -> range.weight >= DEFAULT_MINIMUM_WEIGHT)
+                .map(range -> range.element)
                 .findFirst();
     }
 
@@ -81,63 +106,6 @@ public class App {
         INPUT_ORIGIN_FILE_PATH = cli.getOptionValue(OPTION_ORIGIN_FILE_PATH);
         INPUT_OTHER_SAMPLE_FILE_PATH = cli.getOptionValue(OPTION_OTHER_SAMPLE_FILE_PATH);
         SEARCHING_ELEMENT_ID = cli.getOptionValue(OPTION_SEARCHING_ID);
-    }
-
-    private static void printResult(Element searchItem) {
-        StringJoiner resultText = new StringJoiner(" > ");
-        new ArrayDeque<>(searchItem.parents())
-                .descendingIterator()
-                .forEachRemaining(parent -> resultText.add(parent.tag().toString()));
-        resultText.add(searchItem.tag().toString());
-        LOGGER.info(resultText.toString());
-    }
-
-    private static Map<Element, Attributes> getElementAttributes(Elements elements) {
-        return elements.stream()
-                .distinct()
-                .collect(Collectors.toMap(element -> element, Node::attributes));
-    }
-
-    private static Map<Element, Integer> weightSimilarity(Attributes originAttributes, Map<Element, Attributes> otherElementAttr) {
-        Map<Element, Integer> elementSimilarityWeight = new HashMap<>();
-        otherElementAttr.forEach(((element, attributes) -> {
-            elementSimilarityWeight.put(element, weightAttrSimilarity(originAttributes, attributes));
-        }));
-        return elementSimilarityWeight;
-    }
-
-    private static Integer weightAttrSimilarity(Attributes originAttrs, Attributes otherAttr) {
-        AtomicInteger weightSimilarity = new AtomicInteger(0);
-        originAttrs.iterator()
-                .forEachRemaining(originAttr -> {
-                            String otherAttrValues = otherAttr.get(originAttr.getKey());
-                            if (otherAttrValues.isEmpty()) {
-                                return;
-                            }
-                            weightSimilarity.set(Arrays.stream(originAttr.getValue().split(" "))
-                                    .filter(originAttrValue -> Arrays.asList(otherAttrValues.split(" ")).contains(originAttrValue))
-                                    .flatMapToInt(matchedAttr -> IntStream.of(10))
-                                    .sum());
-
-                        }
-                );
-        return weightSimilarity.get();
-    }
-
-    private static Optional<Document> parseFile(File htmlFile) throws IOException {
-        Document doc = Jsoup.parse(
-                htmlFile,
-                CHARSET_NAME,
-                htmlFile.getAbsolutePath());
-        return Optional.of(doc);
-    }
-
-    private static Optional<Element> findElementById(Document htmlDoc, String targetElementId) {
-        return Optional.ofNullable(htmlDoc.getElementById(targetElementId));
-    }
-
-    private static Optional<Elements> findElementsByQuery(Document htmlDoc, String cssQuery) {
-        return Optional.ofNullable(htmlDoc.select(cssQuery));
     }
 
     private static Options createOptions() {
