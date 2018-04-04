@@ -28,6 +28,7 @@ public class ElementSimilarityWeight {
 
     public Range calculateWeight(Element e) {
         int weight = 0;
+
         if (elementMatcher.matcher(e.id()).find()) {
             weight += 40;
         }
